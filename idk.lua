@@ -1,7 +1,9 @@
 --[[ 
-    CAC Firebase Outfit Fetcher (2026 Optimized)
-    - Fixed: Prevents infinite retry after token expires
-    - Improved logging and Firebase request error handling
+    CAC Firebase Outfit Fetcher (2026 Optimized v2)
+    - Enhanced processing speed by reducing wait time and loop logic
+    - Improved Firebase reliability and error handling
+    - Logs request ID and Discord user ID for traceability
+    - Ensures correct response routing to original requester
 ]]
 
 -- Services
@@ -11,7 +13,7 @@ local HttpService = game:GetService("HttpService")
 local VirtualUser = game:GetService("VirtualUser")
 local Player = Players.LocalPlayer
 
--- Firebase
+-- Firebase Config
 local FIREBASE_URL = "https://cacc-c57bf-default-rtdb.firebaseio.com"
 local API_KEY = "AIzaSyBquxKffIm2lBtpi90GLLDdrQG_0yvlo4Y"
 local currentIdToken = nil
@@ -25,7 +27,7 @@ local UpdateStatusRemote = ReplicatedStorage:WaitForChild("Events"):WaitForChild
 local active = true
 local isProcessing = false
 
--- Logger
+-- Logger UI
 local function createLogger()
     local gui = Instance.new("ScreenGui")
     gui.Name = "CACLogger"
@@ -42,7 +44,7 @@ local function createLogger()
     box.TextWrapped = true
     box.TextXAlignment = Enum.TextXAlignment.Left
     box.TextYAlignment = Enum.TextYAlignment.Top
-    box.Text = "[CAC] Started @ " .. os.date("%X")
+    box.Text = "[CAC] Logger initialized @ " .. os.date("%X")
 
     local btn = Instance.new("TextButton", gui)
     btn.Size = UDim2.fromOffset(100, 30)
@@ -58,15 +60,6 @@ local function createLogger()
         warn("[CAC] Script manually stopped")
     end)
 
-    task.spawn(function()
-        while active and box.Parent do
-            task.wait(1800)
-            if box and box.Parent then
-                box.Text = "[CAC] Log cleared @ " .. os.date("%X")
-            end
-        end
-    end)
-
     return function(msg)
         print("[CAC]", msg)
         if box and box.Parent then
@@ -80,20 +73,20 @@ end
 
 local log = createLogger()
 
--- HTTP Helper with error log
+-- HTTP helper
 local function requestHttp(method, url, body)
     local req = (syn and syn.request) or (http and http.request) or request
     if not req then return end
 
-    local res = req({
+    local success, res = pcall(req, {
         Url = url,
         Method = method,
         Headers = { ["Content-Type"] = "application/json" },
         Body = body and HttpService:JSONEncode(body) or nil
     })
 
-    if not res then
-        log("❌ No response from request: " .. url)
+    if not success or not res then
+        log("❌ Request failed: " .. url)
         return nil
     end
 
@@ -102,74 +95,54 @@ local function requestHttp(method, url, body)
         return nil
     end
 
-    local ok, data = pcall(function()
-        return HttpService:JSONDecode(res.Body)
-    end)
-
-    if ok then
-        return data
-    else
-        log("❌ JSON decode failed: " .. res.Body)
-    end
+    local ok, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+    return ok and data or nil
 end
 
 -- Firebase Auth
 local function auth(force)
     if not force and tick() - lastAuthTime < 3300 then return true end
     log("🔐 Authenticating with Firebase...")
-    local data = requestHttp(
-        "POST",
+    local data = requestHttp("POST",
         "https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=" .. API_KEY,
-        { returnSecureToken = true }
-    )
+        { returnSecureToken = true })
 
     if data and data.idToken then
         currentIdToken = data.idToken
         lastAuthTime = tick()
-        log("✅ Firebase authed")
+        log("✅ Authenticated successfully")
         return true
-    else
-        log("❌ Firebase auth failed")
-        return false
     end
+
+    log("❌ Firebase auth failed")
+    return false
 end
 
--- Firebase Ops (with retry on auth fail)
+-- Firebase Operations
 local function getRequests()
     return requestHttp("GET", FIREBASE_URL .. "/requests.json?auth=" .. currentIdToken) or {}
 end
 
+local function patchRequest(requestId, patchData)
+    local success = requestHttp("PATCH", FIREBASE_URL .. "/requests/" .. requestId .. ".json?auth=" .. currentIdToken, patchData)
+    if not success then
+        log("⚠️ Patch failed, retrying auth...")
+        if auth(true) then
+            requestHttp("PATCH", FIREBASE_URL .. "/requests/" .. requestId .. ".json?auth=" .. currentIdToken, patchData)
+        end
+    end
+end
+
 local function sendResult(requestId, payload)
-    local success = requestHttp("PATCH", FIREBASE_URL .. "/requests/" .. requestId .. ".json?auth=" .. currentIdToken, {
-        result = payload
-    })
-    if not success then
-        log("⚠️ sendResult failed — retrying auth")
-        if auth(true) then
-            requestHttp("PATCH", FIREBASE_URL .. "/requests/" .. requestId .. ".json?auth=" .. currentIdToken, {
-                result = payload
-            })
-        end
-    else
-        log("📤 Sent result to " .. requestId)
-    end
+    patchRequest(requestId, { result = payload })
+    log("📤 Responded to " .. requestId)
 end
 
-local function markProcessing(requestId, value)
-    local success = requestHttp("PATCH", FIREBASE_URL .. "/requests/" .. requestId .. ".json?auth=" .. currentIdToken, {
-        processing = value
-    })
-    if not success then
-        log("⚠️ markProcessing failed — retrying auth")
-        if auth(true) then
-            requestHttp("PATCH", FIREBASE_URL .. "/requests/" .. requestId .. ".json?auth=" .. currentIdToken, {
-                processing = value
-            })
-        end
-    end
+local function markProcessing(requestId, state)
+    patchRequest(requestId, { processing = state })
 end
 
--- Force Reset
+-- Reset Character
 local function forceReset()
     pcall(function()
         CatalogGuiRemote:InvokeServer({
@@ -177,26 +150,27 @@ local function forceReset()
             UserId = Player.UserId,
             RigType = Enum.HumanoidRigType.R15
         })
-    end)
-    pcall(function()
         UpdateStatusRemote:FireServer("None")
     end)
-    log("♻️ Character reset triggered")
+    log("♻️ Character reset")
 end
 
--- Core Handler
-local function handleCode(requestId, rawHex)
+-- Request Handler
+local function handleCode(requestId, hex)
     isProcessing = true
     markProcessing(requestId, true)
 
-    local code = tonumber(rawHex, 16)
+    local code = tonumber(hex, 16)
     if not code then
-        sendResult(requestId, { error = "Invalid hex" })
+        sendResult(requestId, { error = "Invalid hex code" })
         isProcessing = false
         return
     end
 
-    log("📨 Processing CAC " .. code .. " (req: " .. requestId .. ")")
+    local data = requestHttp("GET", FIREBASE_URL .. "/requests/" .. requestId .. ".json?auth=" .. currentIdToken)
+    local userId = data and data.userId or "unknown"
+
+    log("📨 Handling request: ID=" .. requestId .. ", User=" .. userId .. ", Code=" .. code)
 
     local success, outfit = pcall(function()
         return CommunityRemote:InvokeServer({
@@ -211,14 +185,14 @@ local function handleCode(requestId, rawHex)
         return
     end
 
-    local ok = pcall(function()
+    local applied = pcall(function()
         CommunityRemote:InvokeServer({
             Action = "WearCommunityOutfit",
             OutfitInfo = outfit
         })
     end)
 
-    if not ok then
+    if not applied then
         sendResult(requestId, { error = "Failed to apply outfit" })
         isProcessing = false
         return
@@ -226,19 +200,18 @@ local function handleCode(requestId, rawHex)
 
     local char = Player.Character or Player.CharacterAdded:Wait()
     local hum
-    repeat task.wait(0.2) hum = char:FindFirstChildOfClass("Humanoid") until hum
+    repeat task.wait() hum = char:FindFirstChildOfClass("Humanoid") until hum
 
     local desc = hum:FindFirstChildOfClass("HumanoidDescription")
     if not desc then
-        sendResult(requestId, { error = "No HumanoidDescription" })
+        sendResult(requestId, { error = "No HumanoidDescription found" })
         isProcessing = false
         return
     end
 
     local rigType = hum.RigType == Enum.HumanoidRigType.R15 and "R15" or "R6"
-    log("👤 Rig Type: " .. rigType)
-
     local otherAccessories = {}
+
     for _, acc in ipairs(desc:GetAccessories(true)) do
         local entry = {
             assetId = acc.AssetId,
@@ -286,19 +259,19 @@ local function handleCode(requestId, rawHex)
     }
 
     sendResult(requestId, result)
-    log("✅ Sent outfit (" .. #otherAccessories .. " accessories)")
+    log(string.format("✅ Sent outfit for User: %s | %d accessories", userId, #otherAccessories))
 
-    task.delay(3, function()
+    task.delay(2, function()
         forceReset()
         isProcessing = false
     end)
 end
 
--- Main Loop
+-- Listener Loop
 task.spawn(function()
     if not auth() then return end
     while active do
-        task.wait(1.5)
+        task.wait(0.8) -- faster poll
         if isProcessing then continue end
 
         local requests = getRequests()
@@ -316,11 +289,12 @@ task.spawn(function()
     while active do
         Player.Idled:Wait()
         log("⚙️ Anti-AFK triggered")
-        VirtualUser:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+        VirtualUser:Button2Down(Vector2.new(), workspace.CurrentCamera.CFrame)
         task.wait(1)
-        VirtualUser:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+        VirtualUser:Button2Up(Vector2.new(), workspace.CurrentCamera.CFrame)
         task.wait(300)
     end
 end)
 
-log("🟢 CAC listener active")
+log("🟢 CAC Listener Running")
+

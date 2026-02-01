@@ -3,6 +3,9 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local HttpService = game:GetService("HttpService")
 local VirtualUser = game:GetService("VirtualUser")
 local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+local StarterGui = game:GetService("StarterGui")
+local UserInputService = game:GetService("UserInputService")
 
 local Player = Players.LocalPlayer
 local PlayerGui = Player:WaitForChild("PlayerGui", 8)
@@ -13,6 +16,7 @@ local API_KEY = "AIzaSyBquxKffIm2lBtpi90GLLDdrQG_0yvlo4Y"
 local POLL_INTERVAL = 0.25
 local AUTH_REFRESH_MARGIN = 300
 local MAX_LOG_LINES = 120
+local CLAIM_TIMEOUT = 60  -- seconds before reclaiming stuck claims
 
 local CommunityRemote = ReplicatedStorage:WaitForChild("CommunityOutfitsRemote", 8)
 local CatalogGuiRemote = ReplicatedStorage:WaitForChild("CatalogGuiRemote", 8)
@@ -25,6 +29,64 @@ local tokenExpiresAt = 0
 
 local MY_USER_ID = tostring(Player.UserId)
 local usernameCache = {}
+
+local function optimizeGraphics()
+    -- Set lowest graphics quality
+    settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+    
+    -- Disable 3D rendering to improve FPS (simulation still runs)
+    RunService:Set3dRenderingEnabled(false)
+    
+    -- Disable all lighting effects
+    Lighting.GlobalShadows = false
+    Lighting.Brightness = 1
+    Lighting.Ambient = Color3.new(1,1,1)
+    Lighting.OutdoorAmbient = Color3.new(1,1,1)
+    Lighting.EnvironmentDiffuseScale = 0
+    Lighting.EnvironmentSpecularScale = 0
+    Lighting.Technology = Enum.Technology.Compatibility  -- Lower quality
+    
+    -- Disable all post-processing effects
+    for _, effect in ipairs(Lighting:GetChildren()) do
+        if effect:IsA("PostEffect") then
+            effect.Enabled = false
+        end
+    end
+    
+    -- Disable core GUIs and chat
+    pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.All, false) end)
+    pcall(function() StarterGui:SetCore("ChatActive", false) end)
+    
+    -- Disable mouse and inputs if not needed
+    UserInputService.MouseEnabled = false
+    UserInputService.MouseIconEnabled = false
+    
+    -- Minimize workspace streaming
+    workspace.StreamingEnabled = true
+    workspace.StreamingMinRadius = 1000
+    
+    -- Simplify terrain if present
+    local terrain = workspace:FindFirstChildOfClass("Terrain")
+    if terrain then
+        terrain.WaterReflectance = 0
+        terrain.WaterTransparency = 1
+        terrain.WaterWaveSize = 0
+        terrain.WaterWaveSpeed = 0
+        -- Clear materials to reduce texture load
+        terrain:Clear()
+    end
+    
+    -- Remove unnecessary parts/textures in workspace (if any)
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Texture") or obj:IsA("Decal") then
+            obj.Texture = ""
+        elseif obj:IsA("ParticleEmitter") or obj:IsA("Trail") then
+            obj.Enabled = false
+        end
+    end
+    
+    log("Graphics optimized for max FPS")
+end
 
 local function createCleanLogger()
     local gui = Instance.new("ScreenGui")
@@ -130,7 +192,12 @@ local function tryClaim(requestId)
     local url = FIREBASE_URL .. ("/requests/%s.json?auth=%s"):format(requestId, currentIdToken)
     
     local current = http_req("GET", url)
-    if not current or current.claimedBy or current.processing or current.result then 
+    if not current or current.result then 
+        return false 
+    end
+    
+    local timedOut = current.claimedBy and current.claimedAt and (os.time() - current.claimedAt > CLAIM_TIMEOUT)
+    if not timedOut and (current.claimedBy or current.processing) then 
         return false 
     end
     
@@ -149,12 +216,20 @@ local function tryClaim(requestId)
         return false
     end
     
-    log("Claimed → " .. requestId)
+    if timedOut then
+        log("Reclaimed timed out → " .. requestId)
+    else
+        log("Claimed → " .. requestId)
+    end
     return true
 end
 
 local function sendResult(id, payload) 
-    patch(id, {result = payload}) 
+    if patch(id, {result = payload}) then
+        log("Result sent for " .. id)
+    else
+        log("Failed to send result for " .. id)
+    end
 end
 
 local function forceResetCharacter()
@@ -262,22 +337,31 @@ end
 local function processRequest(requestId, data)
     isProcessing = true
     
-    local requesterName = data.username or data.userId or "unknown"
+    local requesterName = data.username or getUsername(data.userId or "unknown")
     log("Processing request from • " .. requesterName .. " • " .. requestId)
     
-    local result = {}
-    local codes = data.codes or (data.code and {data.code}) or {}
-    for i, hexCode in ipairs(codes) do
-        local single = processSingleOutfit(hexCode, requesterName)
-        result["outfit" .. i] = single
-        task.wait(0.5 + math.random(0, 50)/1000)
-    end
-    task.wait(0.3)
-    forceResetCharacter()
+    local success, err = pcall(function()
+        local result = {}
+        local codes = data.codes or (data.code and {data.code}) or {}
+        for i, hexCode in ipairs(codes) do
+            local single = processSingleOutfit(hexCode, requesterName)
+            result["outfit" .. i] = single
+            task.wait(0.5 + math.random(0, 50)/1000)
+        end
+        task.wait(0.3)
+        forceResetCharacter()
+        sendResult(requestId, result)
+    end)
     
-    sendResult(requestId, result)
+    if not success then
+        log("Error in processing: " .. tostring(err))
+        sendResult(requestId, {error = tostring(err)})
+    end
+    
     isProcessing = false
 end
+
+task.spawn(optimizeGraphics)
 
 task.spawn(function()
     if not refreshAuthToken() then
@@ -299,13 +383,9 @@ task.spawn(function()
         for id, data in pairs(requests) do
             local codes = data.codes or (data.code and {data.code}) or {}
             if #codes > 0
-               and not data.result
-               and not data.processing
-               and not data.claimedBy then
+               and not data.result then
                 
                 if tryClaim(id) then
-                    local requesterName = data.username or data.userId or "unknown"
-                    log("Claimed request from • " .. requesterName .. " • " .. requestId)
                     task.spawn(processRequest, id, data)
                     break
                 end
@@ -332,4 +412,4 @@ task.spawn(function()
     end
 end)
 
-log("CAC ready")
+log("CAC ready • optimized • white logs • usernames • 2026")

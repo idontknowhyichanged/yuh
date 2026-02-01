@@ -10,7 +10,7 @@ local PlayerGui = Player:WaitForChild("PlayerGui", 8)
 local FIREBASE_URL = "https://cacc-c57bf-default-rtdb.firebaseio.com"
 local API_KEY = "AIzaSyBquxKffIm2lBtpi90GLLDdrQG_0yvlo4Y"
 
-local POLL_INTERVAL = 0.4
+local POLL_INTERVAL = 0.35           -- slightly faster polling
 local AUTH_REFRESH_MARGIN = 300
 local MAX_LOG_LINES = 120
 
@@ -23,10 +23,8 @@ local isProcessing = false
 local currentIdToken = nil
 local tokenExpiresAt = 0
 
--- ────────────────────────────────────────────────
---   NEW: Used for claiming requests
--- ────────────────────────────────────────────────
-local MY_USER_ID = tostring(Player.UserId)   -- string because Firebase likes strings for IDs
+local MY_USER_ID = tostring(Player.UserId)
+local usernameCache = {}  -- [userid] = username
 
 local function createCleanLogger()
     local gui = Instance.new("ScreenGui")
@@ -43,18 +41,18 @@ local function createCleanLogger()
     local logBox = Instance.new("TextLabel", frame)
     logBox.Size = UDim2.fromScale(1,1)
     logBox.BackgroundTransparency = 1
-    logBox.TextColor3 = Color3.fromRGB(185, 210, 255)
+    logBox.TextColor3 = Color3.new(1,1,1)  -- pure white
     logBox.Font = Enum.Font.Code
     logBox.TextSize = 13.5
     logBox.TextXAlignment = Enum.TextXAlignment.Left
     logBox.TextYAlignment = Enum.TextYAlignment.Top
     logBox.TextWrapped = true
-    logBox.Text = "[CAC] Logger started • "..os.date("%H:%M:%S") .. " • Worker: " .. MY_USER_ID
+    logBox.Text = "[CAC] Logger started • " .. os.date("%H:%M:%S") .. " • Worker: " .. MY_USER_ID
 
     local function addLine(msg)
-        print("[CAC]", msg)
+        print("[CAC] " .. msg)  -- white in output by default
         if not logBox.Parent then return end
-        logBox.Text ..= "\n" .. msg
+        logBox.Text = logBox.Text .. "\n" .. msg
         local lines = logBox.Text:split("\n")
         if #lines > MAX_LOG_LINES then
             logBox.Text = table.concat(lines, "\n", #lines - MAX_LOG_LINES + 1)
@@ -91,9 +89,6 @@ local function http_req(method, url, body)
         Body = body and HttpService:JSONEncode(body) or nil
     })
     if not success or not response or response.StatusCode < 200 or response.StatusCode > 299 then 
-        if response then
-            log("HTTP error: " .. response.StatusCode .. " - " .. (response.Body or "no body"))
-        end
         return nil 
     end
     local ok, json = pcall(HttpService.JSONDecode, HttpService, response.Body)
@@ -121,56 +116,40 @@ local function getRequests()
 end
 
 local function patch(requestId, data)
-    local url = FIREBASE_URL..("/requests/%s.json?auth=%s"):format(requestId, currentIdToken)
-    local success, response = pcall(request_impl, {
+    local url = FIREBASE_URL .. ("/requests/%s.json?auth=%s"):format(requestId, currentIdToken)
+    local success, resp = pcall(request_impl, {
         Url = url,
         Method = "PATCH",
         Headers = {["Content-Type"] = "application/json"},
         Body = HttpService:JSONEncode(data)
     })
-    if not success or not response then 
-        log("Patch failed (pcall/response)") 
-        return false 
-    end
-    if response.StatusCode < 200 or response.StatusCode > 299 then
-        log("Patch error - code: "..response.StatusCode.." body: "..(response.Body or "nil"))
-        return false
-    end
-    return true
+    return success and resp and resp.StatusCode >= 200 and resp.StatusCode < 300
 end
 
--- ────────────────────────────────────────────────
---   NEW: Try to claim this request (optimistic lock)
--- ────────────────────────────────────────────────
 local function tryClaim(requestId)
     local url = FIREBASE_URL .. ("/requests/%s.json?auth=%s"):format(requestId, currentIdToken)
     
-    -- Quick read → check if still free
     local current = http_req("GET", url)
-    if not current then return false end
-    if current.claimedBy or current.processing or current.result then 
+    if not current or current.claimedBy or current.processing or current.result then 
         return false 
     end
     
-    -- Attempt to claim
     local claimData = {
         claimedBy = MY_USER_ID,
         claimedAt = os.time(),
         processing = true
     }
     
-    local patchSuccess = patch(requestId, claimData)
-    if not patchSuccess then return false end
+    if not patch(requestId, claimData) then return false end
     
-    -- Verify we actually got it (race protection)
-    task.wait(0.08 + math.random(0, 120)/1000)  -- tiny random delay
+    task.wait(0.07 + math.random(0, 80)/1000)
     local after = http_req("GET", url)
     if not after or after.claimedBy ~= MY_USER_ID then
-        log("Claim lost race on " .. requestId)
+        log("Claim lost race → " .. requestId)
         return false
     end
     
-    log("Claimed request " .. requestId)
+    log("Claimed → " .. requestId)
     return true
 end
 
@@ -183,26 +162,45 @@ local function forceResetCharacter()
         CatalogGuiRemote:InvokeServer({Action = "MorphIntoPlayer", UserId = Player.UserId, RigType = Enum.HumanoidRigType.R15})
         UpdateStatusRemote:FireServer("None")
     end)
-    log("Final character reset")
+    log("Character reset")
+end
+
+local function getUsername(userIdStr)
+    if usernameCache[userIdStr] then
+        return usernameCache[userIdStr]
+    end
+    
+    local success, data = pcall(function()
+        return Players:GetNameFromUserIdAsync(tonumber(userIdStr))
+    end)
+    
+    if success and data then
+        usernameCache[userIdStr] = data
+        return data
+    else
+        usernameCache[userIdStr] = userIdStr  -- fallback
+        return userIdStr
+    end
 end
 
 local function processSingleOutfit(hexCode, requesterUserId)
     local code = tonumber(hexCode, 16)
     if not code then return {error = "Invalid outfit code"} end
-    local requester = requesterUserId or "?"
-    log(("Processing • user: %s • code: %d"):format(requester, code))
+    
+    local requesterName = getUsername(requesterUserId or "unknown")
+    log("Processing • " .. requesterName .. " • code: " .. code)
     
     local success, outfit = pcall(CommunityRemote.InvokeServer, CommunityRemote, {Action = "GetFromOutfitCode", OutfitCode = code})
-    if not success or not outfit then return {error = "Failed to fetch outfit data"} end
+    if not success or not outfit then return {error = "Failed to fetch outfit"} end
     
     local ok = pcall(CommunityRemote.InvokeServer, CommunityRemote, {Action = "WearCommunityOutfit", OutfitInfo = outfit})
     if not ok then return {error = "Failed to wear outfit"} end
     
     local char = Player.Character or Player.CharacterAdded:Wait()
-    local humanoid = char:WaitForChild("Humanoid", 4)
+    local humanoid = char:WaitForChild("Humanoid", 3)
     if not humanoid then return {error = "Humanoid not found"} end
     
-    local desc = humanoid:WaitForChild("HumanoidDescription", 3.5)
+    local desc = humanoid:WaitForChild("HumanoidDescription", 2.8)
     if not desc then return {error = "No HumanoidDescription"} end
     
     local otherAcc = {}
@@ -258,7 +256,7 @@ local function processSingleOutfit(hexCode, requesterUserId)
         Animations = animations
     }
     
-    log(("Done • %d acc"):format(#otherAcc))
+    log("Done • " .. #otherAcc .. " accessories")
     return result
 end
 
@@ -268,36 +266,33 @@ local function processRequest(requestId, data, requesterUserId)
     local result
     if data.code then
         result = processSingleOutfit(data.code, requesterUserId)
-        task.wait(0.8)
+        task.wait(0.45)
         forceResetCharacter()
     elseif data.codes and typeof(data.codes) == "table" and #data.codes > 0 then
         result = {}
         for i, hexCode in ipairs(data.codes) do
             local single = processSingleOutfit(hexCode, requesterUserId)
-            result["outfit"..i] = single
-            task.wait(1.2)  -- delay between outfits
+            result["outfit" .. i] = single
+            task.wait(0.7 + math.random(0, 100)/1000)  -- 0.7–0.8s jitter
         end
-        task.wait(0.6)
-        forceResetCharacter()  -- only reset once at end
+        task.wait(0.4)
+        forceResetCharacter()
     else
         result = {error = "Invalid request format"}
     end
     
     sendResult(requestId, result)
-    task.wait(0.4)
     isProcessing = false
 end
 
--- ────────────────────────────────────────────────
---   MAIN WORKER LOOP (updated with claiming)
--- ────────────────────────────────────────────────
+-- Main loop
 task.spawn(function()
     if not refreshAuthToken() then
-        log("Initial authentication failed → stopping")
+        log("Initial auth failed → stopping")
         return
     end
     
-    log("Listener active • poll: "..POLL_INTERVAL.."s • multi-worker mode • claimedBy locking")
+    log("Listener active • poll: " .. POLL_INTERVAL .. "s • multi-worker safe")
     
     while active do
         if isProcessing then
@@ -312,11 +307,11 @@ task.spawn(function()
             if (data.code or (data.codes and #data.codes > 0))
                and not data.result
                and not data.processing
-               and not data.claimedBy then   -- only consider unclaimed
+               and not data.claimedBy then
                 
                 if tryClaim(id) then
                     task.spawn(processRequest, id, data, data.userId)
-                    break  -- one request per loop per worker
+                    break  -- process one at a time per worker
                 end
             end
         end
@@ -333,7 +328,7 @@ task.spawn(function()
     while active do
         Player.Idled:Wait()
         if not active then break end
-        log("Anti-AFK kick")
+        log("Anti-AFK triggered")
         pcall(function()
             VirtualUser:CaptureController()
             VirtualUser:ClickButton2(Vector2.new())
@@ -342,5 +337,4 @@ task.spawn(function()
     end
 end)
 
-log("CAC ready • multi-worker • 2026")
-
+log("CAC ready • optimized • white logs • usernames • 2026")

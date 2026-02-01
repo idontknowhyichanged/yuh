@@ -10,7 +10,7 @@ local PlayerGui = Player:WaitForChild("PlayerGui", 8)
 local FIREBASE_URL = "https://cacc-c57bf-default-rtdb.firebaseio.com"
 local API_KEY = "AIzaSyBquxKffIm2lBtpi90GLLDdrQG_0yvlo4Y"
 
-local POLL_INTERVAL = 0.35           -- slightly faster polling
+local POLL_INTERVAL = 0.25
 local AUTH_REFRESH_MARGIN = 300
 local MAX_LOG_LINES = 120
 
@@ -24,7 +24,7 @@ local currentIdToken = nil
 local tokenExpiresAt = 0
 
 local MY_USER_ID = tostring(Player.UserId)
-local usernameCache = {}  -- [userid] = username
+local usernameCache = {}
 
 local function createCleanLogger()
     local gui = Instance.new("ScreenGui")
@@ -41,7 +41,7 @@ local function createCleanLogger()
     local logBox = Instance.new("TextLabel", frame)
     logBox.Size = UDim2.fromScale(1,1)
     logBox.BackgroundTransparency = 1
-    logBox.TextColor3 = Color3.new(1,1,1)  -- pure white
+    logBox.TextColor3 = Color3.new(1,1,1)
     logBox.Font = Enum.Font.Code
     logBox.TextSize = 13.5
     logBox.TextXAlignment = Enum.TextXAlignment.Left
@@ -50,7 +50,7 @@ local function createCleanLogger()
     logBox.Text = "[CAC] Logger started • " .. os.date("%H:%M:%S") .. " • Worker: " .. MY_USER_ID
 
     local function addLine(msg)
-        print("[CAC] " .. msg)  -- white in output by default
+        print("[CAC] " .. msg)
         if not logBox.Parent then return end
         logBox.Text = logBox.Text .. "\n" .. msg
         local lines = logBox.Text:split("\n")
@@ -142,7 +142,7 @@ local function tryClaim(requestId)
     
     if not patch(requestId, claimData) then return false end
     
-    task.wait(0.07 + math.random(0, 80)/1000)
+    task.wait(0.05 + math.random(0, 50)/1000)
     local after = http_req("GET", url)
     if not after or after.claimedBy ~= MY_USER_ID then
         log("Claim lost race → " .. requestId)
@@ -178,16 +178,15 @@ local function getUsername(userIdStr)
         usernameCache[userIdStr] = data
         return data
     else
-        usernameCache[userIdStr] = userIdStr  -- fallback
+        usernameCache[userIdStr] = userIdStr
         return userIdStr
     end
 end
 
-local function processSingleOutfit(hexCode, requesterUserId)
+local function processSingleOutfit(hexCode, requesterName)
     local code = tonumber(hexCode, 16)
     if not code then return {error = "Invalid outfit code"} end
     
-    local requesterName = getUsername(requesterUserId or "unknown")
     log("Processing • " .. requesterName .. " • code: " .. code)
     
     local success, outfit = pcall(CommunityRemote.InvokeServer, CommunityRemote, {Action = "GetFromOutfitCode", OutfitCode = code})
@@ -260,32 +259,26 @@ local function processSingleOutfit(hexCode, requesterUserId)
     return result
 end
 
-local function processRequest(requestId, data, requesterUserId)
+local function processRequest(requestId, data)
     isProcessing = true
     
-    local result
-    if data.code then
-        result = processSingleOutfit(data.code, requesterUserId)
-        task.wait(0.45)
-        forceResetCharacter()
-    elseif data.codes and typeof(data.codes) == "table" and #data.codes > 0 then
-        result = {}
-        for i, hexCode in ipairs(data.codes) do
-            local single = processSingleOutfit(hexCode, requesterUserId)
-            result["outfit" .. i] = single
-            task.wait(0.7 + math.random(0, 100)/1000)  -- 0.7–0.8s jitter
-        end
-        task.wait(0.4)
-        forceResetCharacter()
-    else
-        result = {error = "Invalid request format"}
+    local requesterName = data.username or data.userId or "unknown"
+    log("Processing request from • " .. requesterName .. " • " .. requestId)
+    
+    local result = {}
+    local codes = data.codes or (data.code and {data.code}) or {}
+    for i, hexCode in ipairs(codes) do
+        local single = processSingleOutfit(hexCode, requesterName)
+        result["outfit" .. i] = single
+        task.wait(0.5 + math.random(0, 50)/1000)
     end
+    task.wait(0.3)
+    forceResetCharacter()
     
     sendResult(requestId, result)
     isProcessing = false
 end
 
--- Main loop
 task.spawn(function()
     if not refreshAuthToken() then
         log("Initial auth failed → stopping")
@@ -304,14 +297,17 @@ task.spawn(function()
         local requests = getRequests() or {}
         
         for id, data in pairs(requests) do
-            if (data.code or (data.codes and #data.codes > 0))
+            local codes = data.codes or (data.code and {data.code}) or {}
+            if #codes > 0
                and not data.result
                and not data.processing
                and not data.claimedBy then
                 
                 if tryClaim(id) then
-                    task.spawn(processRequest, id, data, data.userId)
-                    break  -- process one at a time per worker
+                    local requesterName = data.username or data.userId or "unknown"
+                    log("Claimed request from • " .. requesterName .. " • " .. requestId)
+                    task.spawn(processRequest, id, data)
+                    break
                 end
             end
         end
@@ -323,7 +319,6 @@ task.spawn(function()
     end
 end)
 
--- Anti-AFK
 task.spawn(function()
     while active do
         Player.Idled:Wait()
@@ -337,4 +332,4 @@ task.spawn(function()
     end
 end)
 
-log("CAC ready • optimized • white logs • usernames • 2026")
+log("CAC ready")

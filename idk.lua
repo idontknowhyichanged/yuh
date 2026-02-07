@@ -31,61 +31,37 @@ local MY_USER_ID = tostring(Player.UserId)
 local usernameCache = {}
 
 local function optimizeGraphics()
-    -- Set lowest graphics quality
+    -- Set lowest graphics quality (safe)
     settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
     
-    -- 3D rendering disabled can cause streaming issues → commented out
-    -- RunService:Set3dRenderingEnabled(false)
-    
-    -- Disable all lighting effects
+    -- Lighting simplifications (usually safe, reduces load)
     Lighting.GlobalShadows = false
     Lighting.Brightness = 1
     Lighting.Ambient = Color3.new(1,1,1)
     Lighting.OutdoorAmbient = Color3.new(1,1,1)
     Lighting.EnvironmentDiffuseScale = 0
     Lighting.EnvironmentSpecularScale = 0
-    Lighting.Technology = Enum.Technology.Compatibility  -- Lower quality
+    Lighting.Technology = Enum.Technology.Compatibility
     
-    -- Disable all post-processing effects
+    -- Disable post-effects
     for _, effect in ipairs(Lighting:GetChildren()) do
         if effect:IsA("PostEffect") then
             effect.Enabled = false
         end
     end
     
-    -- Disable core GUIs and chat
+    -- Disable unnecessary GUIs/chat (safe for bots)
     pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.All, false) end)
     pcall(function() StarterGui:SetCore("ChatActive", false) end)
     
-    -- Disable mouse and inputs if not needed
+    -- Disable mouse/input visuals (safe)
     UserInputService.MouseEnabled = false
     UserInputService.MouseIconEnabled = false
     
-    -- Removed streaming changes that were causing kicks
-    -- workspace.StreamingEnabled = true
-    -- workspace.StreamingMinRadius = 1000
+    -- NO streaming changes, NO terrain clear, NO texture/decals blanking
     
-    -- Simplify terrain if present
-    local terrain = workspace:FindFirstChildOfClass("Terrain")
-    if terrain then
-        terrain.WaterReflectance = 0
-        terrain.WaterTransparency = 1
-        terrain.WaterWaveSize = 0
-        terrain.WaterWaveSpeed = 0
-        -- Clear materials to reduce texture load
-        terrain:Clear()
-    end
-    
-    -- Remove unnecessary parts/textures in workspace (if any)
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("Texture") or obj:IsA("Decal") then
-            obj.Texture = ""
-        elseif obj:IsA("ParticleEmitter") or obj:IsA("Trail") then
-            obj.Enabled = false
-        end
-    end
-    
-    log("Graphics optimized for max FPS (streaming fixes applied)")
+    task.wait(1)  -- Let client settle after changes
+    log("Graphics lightly optimized (streaming-safe mode)")
 end
 
 local function createCleanLogger()
@@ -369,7 +345,7 @@ task.spawn(function()
         return
     end
     
-    log("Listener active • poll: " .. POLL_INTERVAL .. "s • multi-worker safe (streaming fixes applied)")
+    log("Listener active • poll: " .. POLL_INTERVAL .. "s • multi-worker safe (streaming-safe mode)")
     
     while active do
         if isProcessing then
@@ -412,4 +388,4 @@ task.spawn(function()
     end
 end)
 
-log("CAC ready • optimized • white logs • usernames • streaming fixes • 2026")
+log("CAC ready • streaming-safe • exact animations kept • 2026")

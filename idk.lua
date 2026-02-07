@@ -34,8 +34,8 @@ local function optimizeGraphics()
     -- Set lowest graphics quality
     settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
     
-    -- Disable 3D rendering to improve FPS (simulation still runs)
-    RunService:Set3dRenderingEnabled(false)
+    -- 3D rendering disabled can cause streaming issues → commented out
+    -- RunService:Set3dRenderingEnabled(false)
     
     -- Disable all lighting effects
     Lighting.GlobalShadows = false
@@ -61,9 +61,9 @@ local function optimizeGraphics()
     UserInputService.MouseEnabled = false
     UserInputService.MouseIconEnabled = false
     
-    -- Minimize workspace streaming
-    workspace.StreamingEnabled = true
-    workspace.StreamingMinRadius = 1000
+    -- Removed streaming changes that were causing kicks
+    -- workspace.StreamingEnabled = true
+    -- workspace.StreamingMinRadius = 1000
     
     -- Simplify terrain if present
     local terrain = workspace:FindFirstChildOfClass("Terrain")
@@ -85,7 +85,7 @@ local function optimizeGraphics()
         end
     end
     
-    log("Graphics optimized for max FPS")
+    log("Graphics optimized for max FPS (streaming fixes applied)")
 end
 
 local function createCleanLogger()
@@ -369,7 +369,7 @@ task.spawn(function()
         return
     end
     
-    log("Listener active • poll: " .. POLL_INTERVAL .. "s • multi-worker safe")
+    log("Listener active • poll: " .. POLL_INTERVAL .. "s • multi-worker safe (streaming fixes applied)")
     
     while active do
         if isProcessing then
@@ -412,4 +412,4 @@ task.spawn(function()
     end
 end)
 
-log("CAC ready • optimized • white logs • usernames • 2026")
+log("CAC ready • optimized • white logs • usernames • streaming fixes • 2026")

@@ -246,6 +246,8 @@ local function processSingleOutfit(hexCode, requesterName)
     local ok = pcall(CommunityRemote.InvokeServer, CommunityRemote, {Action = "WearCommunityOutfit", OutfitInfo = outfit})
     if not ok then return {error = "Failed to wear outfit"} end
     
+    task.wait(0.8)
+    
     local char = Player.Character or Player.CharacterAdded:Wait()
     local humanoid = char:WaitForChild("Humanoid", 3)
     if not humanoid then return {error = "Humanoid not found"} end

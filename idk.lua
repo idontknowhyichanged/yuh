@@ -205,7 +205,7 @@ local function forceResetCharacter()
         CatalogGuiRemote:InvokeServer({Action = "MorphIntoPlayer", UserId = Player.UserId, RigType = Enum.HumanoidRigType.R15})
         UpdateStatusRemote:FireServer("None")
     end)
-    task.wait(0.4)  -- Give reset time to settle
+    task.wait(0.5)  -- Let reset settle before next wear
     log("Character reset")
 end
 
@@ -233,35 +233,38 @@ local function processSingleOutfit(hexCode, requesterName)
     
     log("Processing • " .. requesterName .. " • code: " .. code)
     
-    -- Reset before applying new outfit (critical for identical repeated codes)
+    -- Reset BEFORE applying new outfit (prevents previous outfit sticking)
     forceResetCharacter()
     
     local success, outfit = pcall(CommunityRemote.InvokeServer, CommunityRemote, {Action = "GetFromOutfitCode", OutfitCode = code})
     if not success or not outfit or typeof(outfit) ~= "table" then 
-        return {error = "Failed to fetch outfit"} 
+        return {error = "Failed to fetch outfit or invalid response"} 
     end
     
     local ok = pcall(CommunityRemote.InvokeServer, CommunityRemote, {Action = "WearCommunityOutfit", OutfitInfo = outfit})
-    if not ok then return {error = "Failed to wear outfit"} end
+    if not ok then 
+        return {error = "Failed to wear outfit (remote failed)"} 
+    end
     
-    -- Critical: longer wait for wear to fully apply (especially repeated same fit)
-    task.wait(1.4 + math.random(0, 30)/100)  -- 1.4–1.7s range
+    -- Longer wait: give server + replication time to apply changes
+    task.wait(1.7 + math.random(0, 40)/100)  -- ~1.7–2.1 seconds
     
     local char = Player.Character
-    if not char then return {error = "No character after wear"} end
+    if not char then return {error = "Character disappeared after wear"} end
     
     local humanoid = char:FindFirstChildOfClass("Humanoid")
-    if not humanoid then return {error = "Humanoid not found"} end
+    if not humanoid then return {error = "Humanoid missing after wear"} end
     
     local desc = humanoid:FindFirstChildOfClass("HumanoidDescription")
     if not desc then 
-        task.wait(0.3)  -- extra chance
+        -- Give one more chance
+        task.wait(0.4)
         desc = humanoid:FindFirstChildOfClass("HumanoidDescription")
-        if not desc then return {error = "No HumanoidDescription after wait"} end
+        if not desc then return {error = "HumanoidDescription never appeared"} end
     end
     
-    -- Final short settle
-    task.wait(0.25)
+    -- Final settle wait (accessory positions/colors sometimes lag one frame)
+    task.wait(0.35)
     
     local otherAcc = {}
     for _, acc in desc:GetAccessories(true) do
@@ -297,26 +300,26 @@ local function processSingleOutfit(hexCode, requesterName)
         Clothing = {Shirt = desc.Shirt, Pants = desc.Pants},
         Accessories = {Other = otherAcc},
         Scales = {
-            Height    = desc.HeightScale,
-            Width     = desc.WidthScale,
-            Head      = desc.HeadScale,
-            Depth     = desc.DepthScale,
+            Height     = desc.HeightScale,
+            Width      = desc.WidthScale,
+            Head       = desc.HeadScale,
+            Depth      = desc.DepthScale,
             Proportion = desc.ProportionScale,
-            BodyType  = desc.BodyTypeScale,
+            BodyType   = desc.BodyTypeScale,
         },
         Body = {
-            Head   = desc.Head,
-            Torso  = desc.Torso,
+            Head     = desc.Head,
+            Torso    = desc.Torso,
             LeftArm  = desc.LeftArm,
             RightArm = desc.RightArm,
             LeftLeg  = desc.LeftLeg,
             RightLeg = desc.RightLeg,
-            Face   = desc.Face,
+            Face     = desc.Face,
         },
         Animations = animations
     }
     
-    log("Done • " .. #otherAcc .. " accessories")
+    log("Done • " .. #otherAcc .. " accessories • code " .. code)
     return result
 end
 
@@ -324,7 +327,7 @@ local function processRequest(requestId, data)
     isProcessing = true
     
     local requesterName = data.username or getUsername(data.userId or "unknown")
-    log("Processing request from • " .. requesterName .. " • " .. requestId)
+    log("Starting request from • " .. requesterName .. " • " .. requestId)
     
     local success, err = pcall(function()
         local result = {}
@@ -333,19 +336,18 @@ local function processRequest(requestId, data)
         for i, hexCode in ipairs(codes) do
             local single = processSingleOutfit(hexCode, requesterName)
             result["outfit" .. i] = single
-            
-            -- Short breathing room between outfits
-            task.wait(0.6 + math.random(0, 40)/100)
+            -- Small gap between outfits
+            task.wait(0.7 + math.random(0, 50)/100)
         end
         
-        -- Final reset not strictly needed anymore since we reset per outfit, but harmless
+        -- Final cleanup
         forceResetCharacter()
         
         sendResult(requestId, result)
     end)
     
     if not success then
-        log("Error in processing: " .. tostring(err))
+        log("Processing crashed: " .. tostring(err))
         sendResult(requestId, {error = tostring(err)})
     end
     
@@ -360,7 +362,7 @@ task.spawn(function()
         return
     end
     
-    log("Listener active • poll: " .. POLL_INTERVAL .. "s • multi-worker safe (streaming-safe mode)")
+    log("Listener active • poll: " .. POLL_INTERVAL .. "s • multi-worker safe")
     
     while active do
         if isProcessing then
@@ -376,7 +378,7 @@ task.spawn(function()
             if #codes > 0 and not reqData.result then
                 if tryClaim(id) then
                     task.spawn(processRequest, id, reqData)
-                    break  -- process one at a time
+                    break
                 end
             end
         end
@@ -401,4 +403,4 @@ task.spawn(function()
     end
 end)
 
-log("CAC ready • per-outfit reset • 1.4s wear settle • 2026")
+log("CAC ready • reset per outfit + 1.7–2.1s settle • different codes fixed • 2026")

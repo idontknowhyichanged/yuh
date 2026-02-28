@@ -16,7 +16,7 @@ local API_KEY = "AIzaSyBquxKffIm2lBtpi90GLLDdrQG_0yvlo4Y"
 local POLL_INTERVAL = 0.25
 local AUTH_REFRESH_MARGIN = 300
 local MAX_LOG_LINES = 120
-local CLAIM_TIMEOUT = 60  -- seconds before reclaiming stuck claims
+local CLAIM_TIMEOUT = 60
 
 local CommunityRemote = ReplicatedStorage:WaitForChild("CommunityOutfitsRemote", 8)
 local CatalogGuiRemote = ReplicatedStorage:WaitForChild("CatalogGuiRemote", 8)
@@ -31,10 +31,7 @@ local MY_USER_ID = tostring(Player.UserId)
 local usernameCache = {}
 
 local function optimizeGraphics()
-    -- Set lowest graphics quality (safe)
     settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-    
-    -- Lighting simplifications (usually safe, reduces load)
     Lighting.GlobalShadows = false
     Lighting.Brightness = 1
     Lighting.Ambient = Color3.new(1,1,1)
@@ -43,25 +40,20 @@ local function optimizeGraphics()
     Lighting.EnvironmentSpecularScale = 0
     Lighting.Technology = Enum.Technology.Compatibility
     
-    -- Disable post-effects
     for _, effect in ipairs(Lighting:GetChildren()) do
         if effect:IsA("PostEffect") then
             effect.Enabled = false
         end
     end
     
-    -- Disable unnecessary GUIs/chat (safe for bots)
     pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.All, false) end)
     pcall(function() StarterGui:SetCore("ChatActive", false) end)
     
-    -- Disable mouse/input visuals (safe)
     UserInputService.MouseEnabled = false
     UserInputService.MouseIconEnabled = false
     
-    -- NO streaming changes, NO terrain clear, NO texture/decals blanking
-    
-    task.wait(1)  -- Let client settle after changes
-    log("Graphics lightly optimized (streaming-safe mode)")
+    task.wait(1)
+    log("Graphics lightly optimized (streaming-safe)")
 end
 
 local function createCleanLogger()
@@ -211,15 +203,14 @@ end
 local function forceResetCharacter()
     pcall(function()
         CatalogGuiRemote:InvokeServer({Action = "MorphIntoPlayer", UserId = Player.UserId, RigType = Enum.HumanoidRigType.R15})
+        task.wait(0.15)
         UpdateStatusRemote:FireServer("None")
     end)
-    log("Character reset")
+    log("Character force reset")
 end
 
 local function getUsername(userIdStr)
-    if usernameCache[userIdStr] then
-        return usernameCache[userIdStr]
-    end
+    if usernameCache[userIdStr] then return usernameCache[userIdStr] end
     
     local success, data = pcall(function()
         return Players:GetNameFromUserIdAsync(tonumber(userIdStr))
@@ -241,22 +232,39 @@ local function processSingleOutfit(hexCode, requesterName)
     log("Processing • " .. requesterName .. " • code: " .. code)
     
     forceResetCharacter()
-    task.wait(1)
+    task.wait(1.2)  -- time for reset to settle
     
-    local fetch_success, outfit = pcall(CommunityRemote.InvokeServer, CommunityRemote, {Action = "GetFromOutfitCode", OutfitCode = code})
-    if not fetch_success or not outfit then return {error = "Failed to fetch outfit"} end
+    local char = Player.Character
+    if not char or not char:FindFirstChild("Humanoid") then
+        char = Player.CharacterAdded:Wait()
+    end
     
-    local wear_success, wear_result = pcall(CommunityRemote.InvokeServer, CommunityRemote, {Action = "WearCommunityOutfit", OutfitInfo = outfit})
-    if not wear_success or not wear_result then return {error = "Failed to wear outfit"} end
+    local fetch_ok, outfit = pcall(CommunityRemote.InvokeServer, CommunityRemote, {
+        Action = "GetFromOutfitCode",
+        OutfitCode = code
+    })
     
-    task.wait(1.5)
+    if not fetch_ok or not outfit then
+        return {error = "Failed to fetch outfit from code"}
+    end
     
-    local char = Player.Character or Player.CharacterAdded:Wait()
+    local wear_ok, wear_result = pcall(CommunityRemote.InvokeServer, CommunityRemote, {
+        Action = "WearCommunityOutfit",
+        OutfitInfo = outfit
+    })
+    
+    if not wear_ok or not wear_result then
+        return {error = "Failed to wear outfit"}
+    end
+    
+    task.wait(2.0)  -- time for server → client replication of HumanoidDescription
+    
+    char = Player.Character or Player.CharacterAdded:Wait()
     local humanoid = char:WaitForChild("Humanoid", 5)
-    if not humanoid then return {error = "Humanoid not found"} end
+    if not humanoid then return {error = "Humanoid not found after wear"} end
     
     local desc = humanoid:WaitForChild("HumanoidDescription", 5)
-    if not desc then return {error = "No HumanoidDescription"} end
+    if not desc then return {error = "No HumanoidDescription after wear"} end
     
     local otherAcc = {}
     for _, acc in desc:GetAccessories(true) do
@@ -270,43 +278,43 @@ local function processSingleOutfit(hexCode, requesterName)
     end
     
     local animations = {
-        walk = desc.WalkAnimation or 0,
-        run = desc.RunAnimation or 0,
-        jump = desc.JumpAnimation or 0,
-        idle = desc.IdleAnimation or 0,
-        fall = desc.FallAnimation or 0,
-        swim = desc.SwimAnimation or 0,
+        walk  = desc.WalkAnimation  or 0,
+        run   = desc.RunAnimation   or 0,
+        jump  = desc.JumpAnimation  or 0,
+        idle  = desc.IdleAnimation  or 0,
+        fall  = desc.FallAnimation  or 0,
+        swim  = desc.SwimAnimation  or 0,
         climb = desc.ClimbAnimation or 0,
     }
     
     local result = {
         RigType = humanoid.RigType.Name,
         Colors = {
-            Head = desc.HeadColor:ToHex(),
-            Torso = desc.TorsoColor:ToHex(),
-            LeftArm = desc.LeftArmColor:ToHex(),
-            RightArm = desc.RightArmColor:ToHex(),
-            LeftLeg = desc.LeftLegColor:ToHex(),
-            RightLeg = desc.RightLegColor:ToHex(),
+            Head      = desc.HeadColor:ToHex(),
+            Torso     = desc.TorsoColor:ToHex(),
+            LeftArm   = desc.LeftArmColor:ToHex(),
+            RightArm  = desc.RightArmColor:ToHex(),
+            LeftLeg   = desc.LeftLegColor:ToHex(),
+            RightLeg  = desc.RightLegColor:ToHex(),
         },
-        Clothing = {Shirt = desc.Shirt, Pants = desc.Pants},
-        Accessories = {Other = otherAcc},
+        Clothing = { Shirt = desc.Shirt, Pants = desc.Pants },
+        Accessories = { Other = otherAcc },
         Scales = {
-            Height = desc.HeightScale,
-            Width = desc.WidthScale,
-            Head = desc.HeadScale,
-            Depth = desc.DepthScale,
+            Height     = desc.HeightScale,
+            Width      = desc.WidthScale,
+            Head       = desc.HeadScale,
+            Depth      = desc.DepthScale,
             Proportion = desc.ProportionScale,
-            BodyType = desc.BodyTypeScale,
+            BodyType   = desc.BodyTypeScale,
         },
         Body = {
-            Head = desc.Head,
+            Head  = desc.Head,
             Torso = desc.Torso,
-            LeftArm = desc.LeftArm,
+            LeftArm  = desc.LeftArm,
             RightArm = desc.RightArm,
-            LeftLeg = desc.LeftLeg,
+            LeftLeg  = desc.LeftLeg,
             RightLeg = desc.RightLeg,
-            Face = desc.Face,
+            Face  = desc.Face,
         },
         Animations = animations
     }
@@ -319,22 +327,23 @@ local function processRequest(requestId, data)
     isProcessing = true
     
     local requesterName = data.username or getUsername(data.userId or "unknown")
-    log("Processing request from • " .. requesterName .. " • " .. requestId)
+    log("Starting request • " .. requesterName .. " • " .. requestId)
     
     local success, err = pcall(function()
         local result = {}
         local codes = data.codes or (data.code and {data.code}) or {}
+        
         for i, hexCode in ipairs(codes) do
-            local single = processSingleOutfit(hexCode, requesterName)
-            result["outfit" .. i] = single
-            task.wait(0.5 + math.random(0, 50)/1000)
+            local outfitData = processSingleOutfit(hexCode, requesterName)
+            result["outfit" .. i] = outfitData
+            task.wait(0.6 + math.random(0, 80)/1000)
         end
-        task.wait(0.3)
+        
         sendResult(requestId, result)
     end)
     
     if not success then
-        log("Error in processing: " .. tostring(err))
+        log("Processing crashed: " .. tostring(err))
         sendResult(requestId, {error = tostring(err)})
     end
     
@@ -345,11 +354,11 @@ task.spawn(optimizeGraphics)
 
 task.spawn(function()
     if not refreshAuthToken() then
-        log("Initial auth failed → stopping")
+        log("Initial Firebase auth failed → stopping")
         return
     end
     
-    log("Listener active • poll: " .. POLL_INTERVAL .. "s • multi-worker safe (streaming-safe mode)")
+    log("CAC worker active • poll: " .. POLL_INTERVAL .. "s")
     
     while active do
         if isProcessing then
@@ -360,13 +369,11 @@ task.spawn(function()
         local t = tick()
         local requests = getRequests() or {}
         
-        for id, data in pairs(requests) do
-            local codes = data.codes or (data.code and {data.code}) or {}
-            if #codes > 0
-               and not data.result then
-                
+        for id, reqData in pairs(requests) do
+            local codes = reqData.codes or (reqData.code and {reqData.code}) or {}
+            if #codes > 0 and not reqData.result then
                 if tryClaim(id) then
-                    task.spawn(processRequest, id, data)
+                    task.spawn(processRequest, id, reqData)
                     break
                 end
             end
@@ -392,4 +399,4 @@ task.spawn(function()
     end
 end)
 
-log("CAC ready • streaming-safe • exact animations kept • 20267675676")
+log("CAC ready • fixed dupe issue • reset before each outfit")

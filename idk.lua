@@ -31,10 +31,7 @@ local MY_USER_ID = tostring(Player.UserId)
 local usernameCache = {}
 
 local function optimizeGraphics()
-    -- Set lowest graphics quality (safe)
     settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-    
-    -- Lighting simplifications (usually safe, reduces load)
     Lighting.GlobalShadows = false
     Lighting.Brightness = 1
     Lighting.Ambient = Color3.new(1,1,1)
@@ -43,24 +40,19 @@ local function optimizeGraphics()
     Lighting.EnvironmentSpecularScale = 0
     Lighting.Technology = Enum.Technology.Compatibility
     
-    -- Disable post-effects
     for _, effect in ipairs(Lighting:GetChildren()) do
         if effect:IsA("PostEffect") then
             effect.Enabled = false
         end
     end
     
-    -- Disable unnecessary GUIs/chat (safe for bots)
     pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.All, false) end)
     pcall(function() StarterGui:SetCore("ChatActive", false) end)
     
-    -- Disable mouse/input visuals (safe)
     UserInputService.MouseEnabled = false
     UserInputService.MouseIconEnabled = false
     
-    -- NO streaming changes, NO terrain clear, NO texture/decals blanking
-    
-    task.wait(1)  -- Let client settle after changes
+    task.wait(1)
     log("Graphics lightly optimized (streaming-safe mode)")
 end
 
@@ -213,6 +205,7 @@ local function forceResetCharacter()
         CatalogGuiRemote:InvokeServer({Action = "MorphIntoPlayer", UserId = Player.UserId, RigType = Enum.HumanoidRigType.R15})
         UpdateStatusRemote:FireServer("None")
     end)
+    task.wait(0.4)  -- Give reset time to settle
     log("Character reset")
 end
 
@@ -240,20 +233,35 @@ local function processSingleOutfit(hexCode, requesterName)
     
     log("Processing • " .. requesterName .. " • code: " .. code)
     
+    -- Reset before applying new outfit (critical for identical repeated codes)
+    forceResetCharacter()
+    
     local success, outfit = pcall(CommunityRemote.InvokeServer, CommunityRemote, {Action = "GetFromOutfitCode", OutfitCode = code})
-    if not success or not outfit then return {error = "Failed to fetch outfit"} end
+    if not success or not outfit or typeof(outfit) ~= "table" then 
+        return {error = "Failed to fetch outfit"} 
+    end
     
     local ok = pcall(CommunityRemote.InvokeServer, CommunityRemote, {Action = "WearCommunityOutfit", OutfitInfo = outfit})
     if not ok then return {error = "Failed to wear outfit"} end
     
-    task.wait(0.8)
+    -- Critical: longer wait for wear to fully apply (especially repeated same fit)
+    task.wait(1.4 + math.random(0, 30)/100)  -- 1.4–1.7s range
     
-    local char = Player.Character or Player.CharacterAdded:Wait()
-    local humanoid = char:WaitForChild("Humanoid", 3)
+    local char = Player.Character
+    if not char then return {error = "No character after wear"} end
+    
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
     if not humanoid then return {error = "Humanoid not found"} end
     
-    local desc = humanoid:WaitForChild("HumanoidDescription", 2.8)
-    if not desc then return {error = "No HumanoidDescription"} end
+    local desc = humanoid:FindFirstChildOfClass("HumanoidDescription")
+    if not desc then 
+        task.wait(0.3)  -- extra chance
+        desc = humanoid:FindFirstChildOfClass("HumanoidDescription")
+        if not desc then return {error = "No HumanoidDescription after wait"} end
+    end
+    
+    -- Final short settle
+    task.wait(0.25)
     
     local otherAcc = {}
     for _, acc in desc:GetAccessories(true) do
@@ -279,31 +287,31 @@ local function processSingleOutfit(hexCode, requesterName)
     local result = {
         RigType = humanoid.RigType.Name,
         Colors = {
-            Head = desc.HeadColor:ToHex(),
-            Torso = desc.TorsoColor:ToHex(),
-            LeftArm = desc.LeftArmColor:ToHex(),
-            RightArm = desc.RightArmColor:ToHex(),
-            LeftLeg = desc.LeftLegColor:ToHex(),
-            RightLeg = desc.RightLegColor:ToHex(),
+            Head       = desc.HeadColor:ToHex(),
+            Torso      = desc.TorsoColor:ToHex(),
+            LeftArm    = desc.LeftArmColor:ToHex(),
+            RightArm   = desc.RightArmColor:ToHex(),
+            LeftLeg    = desc.LeftLegColor:ToHex(),
+            RightLeg   = desc.RightLegColor:ToHex(),
         },
         Clothing = {Shirt = desc.Shirt, Pants = desc.Pants},
         Accessories = {Other = otherAcc},
         Scales = {
-            Height = desc.HeightScale,
-            Width = desc.WidthScale,
-            Head = desc.HeadScale,
-            Depth = desc.DepthScale,
+            Height    = desc.HeightScale,
+            Width     = desc.WidthScale,
+            Head      = desc.HeadScale,
+            Depth     = desc.DepthScale,
             Proportion = desc.ProportionScale,
-            BodyType = desc.BodyTypeScale,
+            BodyType  = desc.BodyTypeScale,
         },
         Body = {
-            Head = desc.Head,
-            Torso = desc.Torso,
-            LeftArm = desc.LeftArm,
+            Head   = desc.Head,
+            Torso  = desc.Torso,
+            LeftArm  = desc.LeftArm,
             RightArm = desc.RightArm,
-            LeftLeg = desc.LeftLeg,
+            LeftLeg  = desc.LeftLeg,
             RightLeg = desc.RightLeg,
-            Face = desc.Face,
+            Face   = desc.Face,
         },
         Animations = animations
     }
@@ -321,13 +329,18 @@ local function processRequest(requestId, data)
     local success, err = pcall(function()
         local result = {}
         local codes = data.codes or (data.code and {data.code}) or {}
+        
         for i, hexCode in ipairs(codes) do
             local single = processSingleOutfit(hexCode, requesterName)
             result["outfit" .. i] = single
-            task.wait(0.5 + math.random(0, 50)/1000)
+            
+            -- Short breathing room between outfits
+            task.wait(0.6 + math.random(0, 40)/100)
         end
-        task.wait(0.3)
+        
+        -- Final reset not strictly needed anymore since we reset per outfit, but harmless
         forceResetCharacter()
+        
         sendResult(requestId, result)
     end)
     
@@ -358,14 +371,12 @@ task.spawn(function()
         local t = tick()
         local requests = getRequests() or {}
         
-        for id, data in pairs(requests) do
-            local codes = data.codes or (data.code and {data.code}) or {}
-            if #codes > 0
-               and not data.result then
-                
+        for id, reqData in pairs(requests) do
+            local codes = reqData.codes or (reqData.code and {reqData.code}) or {}
+            if #codes > 0 and not reqData.result then
                 if tryClaim(id) then
-                    task.spawn(processRequest, id, data)
-                    break
+                    task.spawn(processRequest, id, reqData)
+                    break  -- process one at a time
                 end
             end
         end
@@ -390,4 +401,4 @@ task.spawn(function()
     end
 end)
 
-log("CAC ready • streaming-safe • exact animations kept • 2026")
+log("CAC ready • per-outfit reset • 1.4s wear settle • 2026")

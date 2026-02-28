@@ -240,17 +240,22 @@ local function processSingleOutfit(hexCode, requesterName)
     
     log("Processing • " .. requesterName .. " • code: " .. code)
     
-    local success, outfit = pcall(CommunityRemote.InvokeServer, CommunityRemote, {Action = "GetFromOutfitCode", OutfitCode = code})
-    if not success or not outfit then return {error = "Failed to fetch outfit"} end
+    forceResetCharacter()
+    task.wait(1)
     
-    local ok = pcall(CommunityRemote.InvokeServer, CommunityRemote, {Action = "WearCommunityOutfit", OutfitInfo = outfit})
-    if not ok then return {error = "Failed to wear outfit"} end
+    local fetch_success, outfit = pcall(CommunityRemote.InvokeServer, CommunityRemote, {Action = "GetFromOutfitCode", OutfitCode = code})
+    if not fetch_success or not outfit then return {error = "Failed to fetch outfit"} end
+    
+    local wear_success, wear_result = pcall(CommunityRemote.InvokeServer, CommunityRemote, {Action = "WearCommunityOutfit", OutfitInfo = outfit})
+    if not wear_success or not wear_result then return {error = "Failed to wear outfit"} end
+    
+    task.wait(1.5)
     
     local char = Player.Character or Player.CharacterAdded:Wait()
-    local humanoid = char:WaitForChild("Humanoid", 3)
+    local humanoid = char:WaitForChild("Humanoid", 5)
     if not humanoid then return {error = "Humanoid not found"} end
     
-    local desc = humanoid:WaitForChild("HumanoidDescription", 2.8)
+    local desc = humanoid:WaitForChild("HumanoidDescription", 5)
     if not desc then return {error = "No HumanoidDescription"} end
     
     local otherAcc = {}
@@ -325,7 +330,6 @@ local function processRequest(requestId, data)
             task.wait(0.5 + math.random(0, 50)/1000)
         end
         task.wait(0.3)
-        forceResetCharacter()
         sendResult(requestId, result)
     end)
     
@@ -388,4 +392,4 @@ task.spawn(function()
     end
 end)
 
-log("CAC ready • streaming-safe • exact animations kept • 2026")
+log("CAC ready • streaming-safe • exact animations kept • 20267675676")
